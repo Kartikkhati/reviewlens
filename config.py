@@ -15,7 +15,7 @@ REASONING_EFFORT = "low"  # gpt-oss is a reasoning model; "low" = less thinking,
 # --- Groq free-tier limits for openai/gpt-oss-120b ---
 TOKENS_PER_MINUTE = 8000
 TOKENS_PER_DAY = 200_000  # refills gradually (~139 tokens/min), not all at midnight
-TOKEN_RESERVE = 10_000    # classify.py never eats into this; it's kept for teardown reports
+TOKEN_RESERVE = 10_000    # classify.py leaves this much of the daily limit unused (headroom for test calls)
 EST_TOKENS_PER_BATCH = 3000  # a classify batch uses ~2,200-3,100 tokens
 
 RANDOM_SEED = 42  # same seed = same "random" sample every run (reproducible)
@@ -31,10 +31,7 @@ CLASSIFY_MAX_CHARS = 300
 # Only classify the date window BOTH apps cover, so the comparison is fair
 WINDOW_START = "2026-10-27"
 WINDOW_END = "2026-11-12"  # inclusive
-DISPLAY_END = "2026-11-11"  # daily charts stop here: 12 Nov was only partly scraped (fake dip)
-
-# Set ALLOW_TEARDOWN=false in Streamlit Cloud Secrets so public visitors can't spend your tokens
-ALLOW_TEARDOWN = os.getenv("ALLOW_TEARDOWN", "true").lower() == "true"
+DISPLAY_END = "2026-11-11"  # dashboard stops here: 12 Nov was only partly scraped
 
 # --- Apps to compare: display name -> Google Play package ID ---
 APPS = {

@@ -1,0 +1,12 @@
+# Look and feel of the dashboard (committed to git; secrets.toml is not)
+[theme]
+base = "light"
+primaryColor = "#1F5F5B"            # the one accent colour: deep teal (buttons, toggles, links)
+backgroundColor = "#FBFBF8"         # warm off-white page
+secondaryBackgroundColor = "#F1F0EB" # cards, expanders, inputs
+textColor = "#1D1D1B"               # near-black text
+font = "sans serif"
+
+[client]
+toolbarMode = "minimal"             # hide developer menus from visitors
+showSidebarNavigation = false

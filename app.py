@@ -1,399 +1,336 @@
-# app.py - Step 4: the ReviewLens dashboard.   Run with:  streamlit run app.py
-import json
-import math
-from datetime import datetime
+# app.py - the ReviewLens report page (layout only; all numbers come from analysis.py).
+# Run with:  streamlit run app.py
+import html
+import re
 
 import altair as alt
 import pandas as pd
 import streamlit as st
 
+import analysis as an
 import config
 
-st.set_page_config(page_title="ReviewLens", page_icon="🔍", layout="wide")
+st.set_page_config(page_title="ReviewLens", layout="centered")
 
-SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]  # colour-blind-safe palette, always in this order
-BAR_COLOUR = SERIES[0]
-NOT_ACTIONABLE = {"Complaint: general", "Other"}  # real complaints, but nothing specific to fix
-MIN_FOR_TEARDOWN = 500
-START, END = pd.Timestamp(config.WINDOW_START), pd.Timestamp(config.WINDOW_END)
-DISPLAY_END = pd.Timestamp(config.DISPLAY_END)  # daily charts only - partial last day hidden
-WINDOW_LABEL = f"{START:%d %b} – {END:%d %b %Y}"
+COLOURS = {"Swiggy": "#E8762E", "Zomato": "#A3213F"}  # one fixed colour per app in every chart (colour-blind checked)
+MUTED = "#C9C8C1"        # anything that is not the point of a chart
+INK_SOFT = "#6B6A64"     # secondary text
+GITHUB_URL = "https://github.com/Kartikkhati/reviewlens"
+LINKEDIN_URL = "https://www.linkedin.com/in/TODO"  # TODO: add my LinkedIn URL
+APP_DOMAIN = alt.Scale(domain=list(COLOURS), range=list(COLOURS.values()))
+
+st.markdown("""
+<style>
+.eyebrow  {font-size:.78rem; letter-spacing:.14em; font-weight:700; color:#1F5F5B; margin:.5rem 0 .5rem}
+.headline {font-size:2.15rem; line-height:1.2; font-weight:700; color:#1D1D1B; margin:0 0 .8rem}
+.subline  {font-size:.92rem; color:#6B6A64; margin-bottom:2rem}
+.check    {font-weight:600; margin:1rem 0 .15rem}
+.meta     {font-size:.82rem; color:#6B6A64; margin-top:.35rem}
+a, a:visited {color:#1F5F5B !important}
+</style>""", unsafe_allow_html=True)
 
 
-# ---------------- 1. Load data (re-read from disk at most every 5 minutes) ----------------
+def tidy(chart):
+    """Same quiet look for every chart: light grid, soft axis text, no border."""
+    return (chart.configure(background="transparent", font="sans-serif")
+            .configure_axis(gridColor="#ECEBE6", domainColor="#D6D5CF", tickColor="#D6D5CF", labelColor="#3F3E3A",
+                            titleColor=INK_SOFT, labelFontSize=12, titleFontSize=12, titleFontWeight="normal")
+            .configure_view(stroke=None)
+            .configure_legend(labelFontSize=12, symbolSize=110, labelColor="#3F3E3A"))
+
+
+def plain(text):
+    """Escape markdown symbols so a review like '*worst* app $$$' shows exactly as written."""
+    return re.sub(r"([\\`*_{}\[\]()#+\-.!|>~$<])", r"\\\1", str(text))
+
+
+def load_recommendations():
+    """Read data/recommendations.md: a '## App' heading per app, then my numbered list -> {app: markdown}."""
+    path = config.DATA_DIR / "recommendations.md"
+    recs, current = {}, None
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("## "):
+                current = line[3:].strip()
+                recs[current] = []
+            elif current and line.strip():
+                recs[current].append(line)
+    return {app_name: "\n".join(lines) for app_name, lines in recs.items()}
+
+
+def fmt_p(p):
+    return "p < 0.001" if p < 0.001 else f"p = {p:.3f}"
+
+
+def html_line(css_class, text):
+    """Show text in a styled block. html.escape turns '<' into '&lt;' so 'p < 0.001' isn't read as a tag."""
+    st.markdown(f'<div class="{css_class}">{html.escape(text)}</div>', unsafe_allow_html=True)
+
+
+# ---------------- Data (re-read from disk at most every 5 minutes) ----------------
 @st.cache_data(ttl=300)
-def load_data():
-    reviews = pd.read_csv(config.REVIEWS_CSV, parse_dates=["at"])
-    day = reviews["at"].dt.normalize()
-    reviews = reviews[(day >= START) & (day <= END)]  # comparison window only
-
-    themes = json.loads(config.THEMES_JSON.read_text())
-    names = [t["name"] for t in themes]
-
-    if config.CLASSIFIED_CSV.exists():
-        # on_bad_lines="skip": classify.py may be writing a line at this very moment
-        labels = pd.read_csv(config.CLASSIFIED_CSV, usecols=["reviewId", "theme", "sentiment"],
-                             on_bad_lines="skip")
-        labels = labels[labels["theme"].isin(names)].drop_duplicates("reviewId")
-    else:
-        labels = pd.DataFrame(columns=["reviewId", "theme", "sentiment"])
-
-    df = reviews.merge(labels, on="reviewId")  # inner join = only reviews that have AI labels
-    summary = pd.read_csv(config.SCRAPE_SUMMARY_CSV)
-    return reviews, df, names, summary
+def load():
+    return an.load()
 
 
-# ---------------- 2. Calculations (plain pandas, no Streamlit) ----------------
-def pain_points(app_df, complaint_themes):
-    """Each complaint theme's share of this app's NEGATIVE reviews."""
-    neg = app_df[app_df["sentiment"] == "negative"]
-    t = (neg[neg["theme"].isin(complaint_themes)]
-         .groupby("theme")
-         .agg(reviews=("reviewId", "size"), upvotes=("thumbsUpCount", "sum"), avg_rating=("score", "mean")))
-    t["share"] = t["reviews"] / max(len(neg), 1)
-    return t.sort_values("share", ascending=False).reset_index()
-
-
-def complaint_rates(df, complaint_themes):
-    """% of each app's classified reviews that are a negative review about each theme."""
-    neg = df[df["sentiment"] == "negative"]
-    counts = pd.crosstab(neg["theme"], neg["app"])
-    totals = df.groupby("app").size()
-    rates = counts.div(totals, axis=1) * 100  # percentages, so apps of different size compare fairly
-    return rates.reindex(index=complaint_themes, columns=list(config.APPS)).fillna(0)
-
-
-def two_proportion_test(x1, n1, x2, n2):
-    """Is x1/n1 really different from x2/n2, or could the gap be luck?
-    Returns the difference and its 95% confidence interval (in percentage points) and the p-value."""
-    p1, p2 = x1 / n1, x2 / n2
-    diff = p1 - p2
-    # z-test: assume both apps share one true rate ("pooled"), and ask how surprising our gap would be
-    pooled = (x1 + x2) / (n1 + n2)
-    se_pooled = math.sqrt(pooled * (1 - pooled) * (1 / n1 + 1 / n2))
-    p_value = math.erfc(abs(diff) / se_pooled / math.sqrt(2)) if se_pooled > 0 else 1.0  # two-sided
-    # 95% confidence interval: the range the true gap probably lies in
-    se = math.sqrt(p1 * (1 - p1) / n1 + p2 * (1 - p2) / n2)
-    return diff * 100, (diff - 1.96 * se) * 100, (diff + 1.96 * se) * 100, p_value
-
-
-def competitor_tests(df, complaint_themes, app, other):
-    """For each complaint theme: % of each app's reviews complaining about it, gap, 95% CI, p-value."""
-    n1, n2 = (df["app"] == app).sum(), (df["app"] == other).sum()
-    neg = df[df["sentiment"] == "negative"]
-    rows = []
-    for theme in complaint_themes:
-        x1 = ((neg["app"] == app) & (neg["theme"] == theme)).sum()
-        x2 = ((neg["app"] == other) & (neg["theme"] == theme)).sum()
-        gap, low, high, p = two_proportion_test(x1, n1, x2, n2)
-        rows.append({"theme": theme, app: x1 / n1 * 100, other: x2 / n2 * 100,
-                     "gap": gap, "ci": f"{low:+.1f} to {high:+.1f}", "p": p})
-    return pd.DataFrame(rows).set_index("theme").sort_values(app, ascending=False)
-
-
-INSTAMART_PATTERN = r"instamart|grocer(?:y|ies)"
-
-
-def instamart_check(all_reviews, df):
-    """How many Swiggy reviews are about Instamart/grocery, and how much of 'Late delivery' they explain."""
-    window = all_reviews[all_reviews["app"] == "Swiggy"]
-    sw = df[df["app"] == "Swiggy"]
-    mentions = sw["content"].str.contains(INSTAMART_PATTERN, case=False, regex=True)
-    late = (sw["theme"] == "Late delivery") & (sw["sentiment"] == "negative")
-    return {
-        "window_reviews": len(window),
-        "window_mentions": int(window["content"].str.contains(INSTAMART_PATTERN, case=False, regex=True).sum()),
-        "classified": len(sw),
-        "classified_mentions": int(mentions.sum()),
-        "late_total": int(late.sum()),
-        "late_mentions": int((late & mentions).sum()),
-        # Swiggy's late-delivery rate if we ignore every Instamart/grocery review
-        "late_rate_without": (late & ~mentions).sum() / max((~mentions).sum(), 1) * 100,
-    }
-
-
-def key_finding(df, complaint_themes):
-    """One plain sentence: the largest gap that survives a Bonferroni-corrected significance test."""
-    a, b = list(config.APPS)[:2]
-    tests = competitor_tests(df, complaint_themes, a, b)
-    alpha = 0.05 / len(tests)  # Bonferroni: stricter threshold because we test many themes at once
-    sig = tests[tests["p"] < alpha]
-    if sig.empty:
-        return (f"No complaint theme differs significantly between {a} and {b} yet "
-                f"(Bonferroni-corrected threshold p < {alpha:.4f}, {len(tests)} themes tested).")
-    theme = sig["gap"].abs().idxmax()
-    row = sig.loc[theme]
-    worse, better = (a, b) if row["gap"] > 0 else (b, a)
-    hi, lo = max(row[a], row[b]), min(row[a], row[b])
-    times = f"{hi / lo:.1f}× as often as" if lo > 0 else "more often than"
-    p = "p < 0.001" if row["p"] < 0.001 else f"p = {row['p']:.3f}"
-    return (f"**{worse}** users complain about **{theme.lower()}** {times} {better} users: "
-            f"{hi:.1f}% vs {lo:.1f}% of reviews, a gap of {abs(row['gap']):.1f} percentage points "
-            f"({p}; significant even after Bonferroni correction across {len(tests)} themes).")
-
-
-def daily_trend(app_df, themes):
-    """Daily number of negative reviews for the given themes, with 0 for days with none."""
-    neg = app_df[(app_df["sentiment"] == "negative") & app_df["theme"].isin(themes)]
-    counts = neg.groupby([neg["at"].dt.normalize().rename("date"), "theme"]).size()
-    grid = pd.MultiIndex.from_product([pd.date_range(START, DISPLAY_END), themes], names=["date", "theme"])
-    return counts.reindex(grid, fill_value=0).reset_index(name="reviews")
-
-
-def teardown_prompt(app, app_df, pain, rates):
-    """Build the LLM prompt from computed numbers + a few real reviews. Nothing else is sent."""
-    others = [a for a in config.APPS if a != app]
-    neg = app_df[app_df["sentiment"] == "negative"]
-    top5 = [t for t in pain["theme"] if t not in NOT_ACTIONABLE][:5]
-
-    themes_data = []
-    for rank, theme in enumerate(top5, 1):
-        row = pain.set_index("theme").loc[theme]
-        examples = neg[neg["theme"] == theme].nlargest(4, "thumbsUpCount")
-        themes_data.append({
-            "rank": rank,
-            "theme": theme,
-            "negative_reviews": int(row["reviews"]),
-            "share_of_negative_reviews_pct": round(row["share"] * 100, 1),
-            "pct_of_all_reviews": round(rates.loc[theme, app], 1),
-            "competitor_pct_of_all_reviews": {o: round(rates.loc[theme, o], 1) for o in others},
-            "total_upvotes": int(row["upvotes"]),
-            "avg_star_rating": round(row["avg_rating"], 2),
-            "most_upvoted_reviews": [
-                {"upvotes": int(r.thumbsUpCount), "stars": int(r.score), "text": str(r.content)[:300]}
-                for r in examples.itertuples()
-            ],
-        })
-
-    data = {
-        "app": app,
-        "competitors": others,
-        "period": WINDOW_LABEL,
-        "reviews_analysed": len(app_df),
-        "pct_negative": round((app_df["sentiment"] == "negative").mean() * 100, 1),
-        "data_caveat": "Reviews under 4 words were removed; most of those were 4-5 stars, so ratings and "
-                       "% negative are lower than the store's. Use the data to rank problems, not to "
-                       "measure overall satisfaction.",
-        "top_pain_themes": themes_data,
-    }
-
-    return f"""You are a senior product manager writing a product teardown of the {app} app
-from Google Play reviews, for a startup leadership team.
-
-STRICT RULES
-- Use ONLY the numbers and reviews in DATA. Do not invent statistics, user counts or company facts.
-- When you cite a number, copy it exactly from DATA. Quote reviews only from DATA (short excerpts).
-- Root causes are hypotheses: label them as such.
-- Effort is S, M or L with a one-line reason.
-
-FORMAT (markdown)
-## Executive summary
-3-4 sentences: the biggest problems, how {app} compares with competitors, what to fix first.
-## Pain points
-For each theme in DATA, in rank order:
-### <rank>. <theme>
-- **Problem:** ...
-- **Evidence:** numbers from DATA, incl. competitor comparison, plus 1-2 short quotes
-- **Root-cause hypothesis:** ...
-- **Proposed fix:** concrete product or operations change
-- **Effort:** S/M/L - reason
-## Top 3 fixes (ranked)
-Numbered list; rank by impact (share of complaints, upvotes, gap vs competitor) against effort.
-
-DATA
-{json.dumps(data, indent=1, ensure_ascii=False)}"""
-
-
-# ---------------- 3. Page ----------------
-all_reviews, df, theme_names, summary = load_data()
-complaint_themes = [t for t in theme_names if not t.startswith("Praise")]
-
-st.title("🔍 ReviewLens")
-st.caption("AI product teardowns from Play Store reviews")
-
-total, done = len(all_reviews), len(df)
-if done < total:
-    st.info(f"Based on **{done:,} of {total:,}** reviews classified so far (random sample). "
-            "Numbers update automatically as classification continues.")
-
-with st.container(border=True):
-    st.markdown("**🔑 Key finding**")
-    st.markdown(key_finding(df, complaint_themes))
-
-# Sidebar
-app = st.sidebar.selectbox("App", list(config.APPS))
-others = [a for a in config.APPS if a != app]
-st.sidebar.caption(f"Comparison window: {WINDOW_LABEL}")
-if st.sidebar.button("Refresh data now"):
-    st.cache_data.clear()
-    st.rerun()
-
-mine = df[df["app"] == app]
-if mine.empty:
-    st.warning(f"No classified {app} reviews yet. Run classify.py first.")
+all_reviews, df, theme_names, summary = load()
+if df.empty:
+    st.write("No classified reviews yet. Run classify.py first.")
     st.stop()
 
-# --- Metrics ---
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Reviews classified", f"{len(mine):,}", help=f"of {len(all_reviews[all_reviews.app == app]):,} in the window")
-c2.metric("Average rating", f"{mine['score'].mean():.2f} ★",
-          help="Of reviews with 4+ words. Lower than the store rating by design - see 'About the data'.")
-c3.metric("% negative", f"{(mine['sentiment'] == 'negative').mean():.0%}", help="Judged by the AI from the text")
-c4.metric("Date range", f"{mine['at'].min():%d %b} – {mine['at'].max():%d %b}")
+complaint_themes = [t for t in theme_names if not t.startswith("Praise")]
+finding = an.key_finding(df, complaint_themes)
+a, b = finding["a"], finding["b"]
+total, done = len(all_reviews), len(df)
+sample_note = f" · {done / total:.0%} classified so far (random sample)" if done < total else ""
 
-# --- Top pain points ---
-st.header(f"Top pain points: {app}")
-pain = pain_points(mine, complaint_themes)
-left, right = st.columns([3, 2])
-with left:
-    bars = alt.Chart(pain).mark_bar(color=BAR_COLOUR, cornerRadiusEnd=4).encode(
-        x=alt.X("share:Q", title="Share of negative reviews", axis=alt.Axis(format=".0%")),
-        y=alt.Y("theme:N", sort="-x", title=None),
-        tooltip=[alt.Tooltip("theme:N", title="Theme"), alt.Tooltip("share:Q", title="Share", format=".1%"),
-                 alt.Tooltip("reviews:Q", title="Reviews"), alt.Tooltip("upvotes:Q", title="Upvotes")],
-    ).properties(height=max(260, 28 * len(pain)))
-    st.altair_chart(bars, width="stretch")
-with right:
-    st.dataframe(
-        pain[["theme", "reviews", "share", "upvotes", "avg_rating"]],
-        hide_index=True, width="stretch",
-        column_config={
-            "theme": "Theme",
-            "reviews": st.column_config.NumberColumn("Reviews"),
-            "share": st.column_config.NumberColumn("Share", format="percent"),
-            "upvotes": st.column_config.NumberColumn("Upvotes", help="Total 'helpful' votes on these reviews"),
-            "avg_rating": st.column_config.NumberColumn("Avg ★", format="%.2f"),
-        },
-    )
+# ---------------- Hero ----------------
+if finding["theme"]:
+    w, br, hi, lo = finding["worse"], finding["better"], finding["hi"], finding["lo"]
+    how_often = f"{an.times_words(hi / lo)} as often as" if lo > 0 else "far more often than"
+    headline = f"{w} users complain about {finding['theme'].lower()} {how_often} {br} users."
+    subline = f"{hi:.1f}% vs {lo:.1f}% of reviews · based on {done:,} reviews, {an.PERIOD}{sample_note}"
+else:
+    headline = f"{a} and {b} users complain about the same things."
+    subline = f"No complaint differs clearly between the apps · based on {done:,} reviews, {an.PERIOD}{sample_note}"
 
-# --- Competitor comparison ---
-st.header("Competitor comparison")
-other = others[0]  # the test compares two apps
-st.caption(f"% of each app's reviews that complain about each theme, and the gap ({app} minus {other}) "
-           "in percentage points (pp).")
-rates = complaint_rates(df, complaint_themes)  # still used by the teardown prompt
-comp = competitor_tests(df, complaint_themes, app, other)
-comp["verdict"] = [
-    ("▲ worse" if g > 0 else "▼ better") + " (significant)" if p < 0.05 else "not significant"
-    for g, p in zip(comp["gap"], comp["p"])
-]
+html_line("eyebrow", "REVIEWLENS")
+html_line("headline", headline)
+html_line("subline", subline)
 
+# ---------------- The proof: dumbbell chart ----------------
+tests = finding["tests"]
+n_sig = finding["n_sig"]
+if n_sig == 1:
+    proof_title = f"{finding['theme']} is the only complaint where the apps really differ"
+elif n_sig > 1:
+    proof_title = f"The apps really differ on {n_sig} complaints"
+else:
+    proof_title = "No complaint differs clearly between the apps"
+st.subheader(proof_title)
+# TODO: rewrite in my words
+st.caption(f"Share of each app's reviews that complain about each topic. Grey = gap could be chance.")
 
-def style_row(row):
-    if row["p"] >= 0.05:
-        return ["color: #8a8984"] * len(row)  # grey = can't tell the apps apart
-    colour = "rgba(227, 73, 72, 0.22)" if row["gap"] > 0 else "rgba(27, 175, 122, 0.20)"
-    return [f"background-color: {colour}; font-weight: 600"] * len(row)
+t = tests.drop(index=list(an.NOT_ACTIONABLE), errors="ignore")  # vague topics: nothing to compare or fix
+t = t[(t[a] > 0) | (t[b] > 0)].copy()
+t["low_pct"], t["high_pct"] = t[[a, b]].min(axis=1), t[[a, b]].max(axis=1)
+order = t.sort_values("high_pct", ascending=False).index.tolist()
+wide = t.reset_index()
+long = wide.melt(id_vars=["theme", "significant"], value_vars=[a, b], var_name="app", value_name="pct")
+long["key"] = long["app"].where(long["significant"], "No real difference")
+long["label"] = long["pct"].map("{:.1f}%".format)
 
-
-styled = (comp.style
-          .apply(style_row, axis=1)
-          .format({app: "{:.1f}%", other: "{:.1f}%", "gap": "{:+.1f} pp",
-                   "p": lambda p: "< 0.001" if p < 0.001 else f"{p:.3f}"}))
-st.dataframe(styled, width="stretch", column_config={
-    "_index": "Theme", "gap": "Gap", "ci": "95% CI of gap (pp)", "p": "p-value", "verdict": "Verdict"})
-st.caption(
-    "**How to read this:** a gap is *significant* when p < 0.05, i.e. a difference this large would happen "
-    "less than 5% of the time by chance if both apps really had the same complaint rate, and then the 95% "
-    "confidence interval does not include 0. Grey rows could be noise. With ~13 themes tested, expect about "
-    "one 'significant' result by luck alone, so trust large, low-p gaps most.")
-
-if "Swiggy" in config.APPS:
-    im = instamart_check(all_reviews, df)
-    st.caption(
-        f"**Instamart note:** {im['window_mentions']:,} of {im['window_reviews']:,} Swiggy reviews in the window "
-        f"mention Instamart or grocery. Among classified ones, {im['late_mentions']} of Swiggy's "
-        f"{im['late_total']} late-delivery complaints mention them. The Swiggy app includes Instamart "
-        f"(quick-commerce groceries) while Zomato's equivalent (Blinkit) is a separate app, so this comparison is "
-        f"not perfectly like-for-like. Without those reviews, Swiggy's late-delivery rate is "
-        f"{im['late_rate_without']:.1f}%.")
-
-# --- Trend ---
-top4 = [t for t in pain["theme"] if t not in NOT_ACTIONABLE][:4]
-st.header("Daily trend of the top 4 pain points")
-trend = daily_trend(mine, top4)
-lines = alt.Chart(trend).mark_line(strokeWidth=2, point=alt.OverlayMarkDef(size=64, filled=True)).encode(
-    x=alt.X("date:T", title=None, axis=alt.Axis(format="%d %b")),
-    y=alt.Y("reviews:Q", title="Negative reviews per day"),
-    color=alt.Color("theme:N", scale=alt.Scale(domain=top4, range=SERIES[: len(top4)]),
+y = alt.Y("theme:N", sort=order, title=None, axis=alt.Axis(labelLimit=0, domain=False, ticks=False, labelPadding=8))
+x_title = "% of the app's reviews"
+rules = alt.Chart(wide).mark_rule(strokeWidth=2).encode(
+    y=y, x=alt.X("low_pct:Q", title=x_title), x2="high_pct:Q",
+    color=alt.condition("datum.significant", alt.value(INK_SOFT), alt.value("#E4E3DD")))
+dots = alt.Chart(long).mark_circle(opacity=1, stroke="#FBFBF8").encode(
+    y=y, x=alt.X("pct:Q", title=x_title),
+    # grey dots: smaller and without the white ring, so two close dots merge cleanly instead of overlapping
+    size=alt.condition("datum.significant", alt.value(140), alt.value(60)),
+    strokeWidth=alt.condition("datum.significant", alt.value(2), alt.value(0)),
+    color=alt.Color("key:N", scale=alt.Scale(domain=[a, b, "No real difference"],
+                                             range=[COLOURS[a], COLOURS[b], MUTED]),
                     legend=alt.Legend(orient="top", title=None)),
-    tooltip=[alt.Tooltip("date:T", title="Date", format="%a %d %b"), alt.Tooltip("theme:N", title="Theme"),
-             alt.Tooltip("reviews:Q", title="Reviews")],
-).properties(height=320)
-st.altair_chart(lines, width="stretch")
-st.caption("Counts come from the classified sample, so they rise as classification continues - "
-           "compare the shape of the lines, not their height. 'Complaint: general' and 'Other' are left "
-           "out because they have no specific fix.")
+    tooltip=[alt.Tooltip("theme:N", title="Complaint"), alt.Tooltip("app:N", title="App"),
+             alt.Tooltip("pct:Q", title="% of reviews", format=".1f")])
+labels = alt.Chart(long[long["significant"]]).mark_text(dy=-14, fontSize=12, fontWeight=600, color="#1D1D1B").encode(
+    y=y, x="pct:Q", text="label:N")
+st.altair_chart(tidy((rules + dots + labels).properties(height=34 * len(order))), width="stretch", theme=None)
 
-# --- Teardown ---
-st.header("AI teardown")
-path = config.DATA_DIR / f"teardown_{app.lower()}.md"
-enough = len(mine) >= MIN_FOR_TEARDOWN
-prompt = teardown_prompt(app, mine, pain, rates)
+with st.expander("Statistical details", expanded=False):
+    # TODO: rewrite in my words
+    st.caption(f"A gap is real when p < {finding['alpha']:.4f}: 0.05 divided by the {len(tests)} topics tested "
+               "(Bonferroni correction).  \nThe 95% interval is the range the true gap most likely falls in.")
+    table = pd.DataFrame({
+        "Complaint": tests.index,
+        a: tests[a].map("{:.1f}%".format).values,
+        b: tests[b].map("{:.1f}%".format).values,
+        "Gap": tests["gap"].map("{:+.1f} pp".format).values,
+        "95% interval": [f"{lo_:+.1f} to {hi_:+.1f} pp" for lo_, hi_ in zip(tests["ci_low"], tests["ci_high"])],
+        "p-value": tests["p"].map(lambda p: "< 0.001" if p < 0.001 else f"{p:.3f}").values,
+        "Real difference": tests["significant"].map({True: "Yes", False: "No"}).values,
+    })
+    styled = table.style.apply(
+        lambda r: [""] * len(r) if r["Real difference"] == "Yes" else ["color: #9A9993"] * len(r), axis=1)
+    st.dataframe(styled, hide_index=True, width="stretch")
 
-with st.expander("What gets sent to the LLM"):
-    st.caption(f"~{len(prompt) // 4:,} tokens. Only computed numbers and the 4 most-upvoted reviews "
-               "for each of the top 5 pain themes.")
-    st.code(prompt, language="markdown")
+# ---------------- What I checked ----------------
+if finding["theme"]:
+    theme = finding["theme"]
+    st.subheader("What I checked")
 
-clicked = st.button("Regenerate teardown" if path.exists() else "Generate teardown", type="primary",
-                    disabled=not (enough and config.ALLOW_TEARDOWN),
-                    help=None if enough else f"Needs {MIN_FOR_TEARDOWN} classified {app} reviews (now {len(mine)}).")
-if not config.ALLOW_TEARDOWN:
-    st.caption("Generation is turned off in this public demo; the saved report below was generated by the author.")
-elif not enough:
-    st.caption(f"Available once {MIN_FOR_TEARDOWN} {app} reviews are classified (currently {len(mine)}).")
+    html_line("check", f"Not random chance ({fmt_p(finding['p'])})")
+    with st.expander("Details", expanded=False):
+        # TODO: rewrite in my words
+        st.write(f"If both apps had the same true rate, a gap this big would almost never happen by luck. "
+                 f"I tested {len(tests)} topics, so I used a stricter bar: p < {finding['alpha']:.4f}.")
 
-if clicked:
-    import llm  # imported here so the dashboard still opens if no API key is set
+    if "Swiggy" in config.APPS:
+        other = next(x for x in config.APPS if x != "Swiggy")
+        im = an.instamart_check(all_reviews, df, theme, other)
+        verdict = "Not driven by Instamart" if im["survives"] else "Partly driven by Instamart"
+        html_line("check", f"{verdict} ({im['rate_without']:.1f}% without grocery reviews)")
+        with st.expander("Details", expanded=False):
+            # TODO: rewrite in my words
+            st.write(f"The Swiggy app includes Instamart (groceries). Zomato's Blinkit is a separate app. "
+                     f"{im['window_mentions']} of {im['window_reviews']:,} Swiggy reviews mention Instamart or groceries. "
+                     f"Only {im['hits_mentioning']} of {im['hits']} {theme.lower()} complaints do. "
+                     f"Without them, Swiggy is at {im['rate_without']:.1f}% vs {im['other_rate']:.1f}% for {other}. "
+                     f"This is a keyword search, so grocery reviews that never say 'Instamart' are missed.")
 
-    with st.spinner("Writing the teardown (about 30-60 seconds)..."):
-        try:
-            report, usage = llm.chat(prompt, max_tokens=4000, label="teardown")
-        except llm.DailyLimitReached:
-            st.error("Groq's daily token limit is used up. Try again later.")
-        except Exception as e:
-            st.error(f"LLM call failed: {e}")
-        else:
-            header = (f"_Generated {datetime.now():%d %b %Y %H:%M} by {config.LLM_MODEL} from "
-                      f"{len(mine):,} classified {app} reviews ({WINDOW_LABEL})._\n\n")
-            path.write_text(header + report, encoding="utf-8")
-            st.success(f"Saved to {path.name} ({usage.total_tokens:,} tokens used)")
+    fest = an.festival_check(df, theme)
+    spike = any(v["spike"] for v in fest.values())
+    line = "Possible Diwali effect (higher on festival days)" if spike else "Not a Diwali spike (no festival increase)"
+    html_line("check", line)
+    with st.expander("Details", expanded=False):
+        # TODO: rewrite in my words
+        st.write("Diwali was on 8 Nov 2026. I compared festival days (6–11 Nov) with all other days.")
+        for app_name, v in fest.items():
+            st.write(f"{app_name}: {v['festival']:.1f}% on festival days vs {v['other']:.1f}% on other days "
+                     f"({fmt_p(v['p'])}).")
+        st.write("With about 40 classified reviews a day, a small festival effect could still be missed.")
 
-if path.exists():
-    st.markdown(path.read_text(encoding="utf-8"))
-    st.download_button("Download teardown (.md)", path.read_text(encoding="utf-8"), file_name=path.name)
+# ---------------- Trend ----------------
+trend_theme = finding["theme"] or "Late delivery"
+st.subheader(f"{trend_theme} complaints, day by day")
+MIN_DAILY = 15  # a day with fewer classified reviews is too noisy to plot (e.g. Zomato's half-scraped 27 Oct)
+# TODO: rewrite in my words
+st.caption(f"Share of each day's reviews, {an.PERIOD}. Days with fewer than {MIN_DAILY} reviews are hidden.")
+daily = an.daily_share(df, trend_theme)
+daily = daily[daily["reviews"] >= MIN_DAILY]
+diwali = pd.DataFrame({"date": [pd.Timestamp("2026-11-08")], "label": ["Diwali"]})
+lines = alt.Chart(daily).mark_line(strokeWidth=2, point=alt.OverlayMarkDef(size=60, filled=True)).encode(
+    x=alt.X("date:T", title=None, axis=alt.Axis(format="%d %b", labelAngle=0, grid=False)),
+    y=alt.Y("share:Q", title="% of the day's reviews"),
+    color=alt.Color("app:N", scale=APP_DOMAIN, legend=alt.Legend(orient="top", title=None)),
+    tooltip=[alt.Tooltip("date:T", title="Date", format="%a %d %b"), alt.Tooltip("app:N", title="App"),
+             alt.Tooltip("share:Q", title="% of reviews", format=".1f"), alt.Tooltip("reviews:Q", title="Reviews that day")])
+marker = alt.Chart(diwali).mark_rule(strokeDash=[4, 4], color="#9A9993").encode(x="date:T")
+marker_text = alt.Chart(diwali).mark_text(align="left", dx=5, dy=8, color=INK_SOFT, fontSize=11).encode(
+    x="date:T", y=alt.value(0), text="label:N")
+st.altair_chart(tidy((marker + marker_text + lines).properties(height=300)), width="stretch", theme=None)
 
-# --- About the data ---
-st.header("About the data")
-st.write("Most short reviews we removed (under 4 words, like “good app”) were 4–5 stars, so the "
-         "reviews left behind skew negative: **ReviewLens ranks problems; it does not measure overall "
-         "customer satisfaction.**")
+# ---------------- What to fix ----------------
+fix_title = st.empty()  # placeholder: the heading names the app picked in the toggle just below it
+app = st.segmented_control("App", list(config.APPS), default=list(config.APPS)[0], key="fix_app",
+                           label_visibility="collapsed") or list(config.APPS)[0]
+fix_title.subheader(f"What {app} should fix first")
+mine = df[df["app"] == app]
+pain = an.pain_points(mine, complaint_themes)
+fix = pain[~pain["theme"].isin(an.NOT_ACTIONABLE)].reset_index(drop=True)
+fix["colour"] = [COLOURS[app]] + [MUTED] * (len(fix) - 1)  # highlight only the top problem
+fix["label"] = (fix["share"] * 100).round().astype(int).astype(str) + "%"
+n_neg = (mine["sentiment"] == "negative").sum()
+# TODO: rewrite in my words
+st.caption(f"Share of {app}'s {n_neg:,} complaints. Vague ones like 'worst app' are not shown.")
+fy = alt.Y("theme:N", sort=None, title=None, axis=alt.Axis(labelLimit=0, domain=False, ticks=False, labelPadding=8))
+fbars = alt.Chart(fix).mark_bar(cornerRadiusEnd=4, height=18).encode(
+    y=fy, x=alt.X("share:Q", axis=None), color=alt.Color("colour:N", scale=None),
+    tooltip=[alt.Tooltip("theme:N", title="Complaint"), alt.Tooltip("label:N", title="Share"),
+             alt.Tooltip("reviews:Q", title="Reviews")])
+ftext = alt.Chart(fix).mark_text(align="left", dx=6, fontSize=12, color="#3F3E3A").encode(y=fy, x="share:Q", text="label:N")
+st.altair_chart(tidy((fbars + ftext).properties(height=32 * len(fix))), width="stretch", theme=None)
+
+# Connect this chart (share of complaints) to the headline (share of ALL reviews) - two different denominators
+note_theme = finding["theme"] or (fix["theme"].iloc[0] if len(fix) else None)
+if note_theme:
+    of_complaints = pain.set_index("theme")["share"].get(note_theme, 0) * 100
+    of_all = tests.loc[note_theme, app]
+    in_headline = " (the number in the headline)" if note_theme == finding["theme"] else ""
+    # TODO: rewrite in my words
+    st.caption(f"{note_theme} is {of_complaints:.0f}% of {app}'s complaints, or {of_all:.1f}% of all its "
+               f"reviews{in_headline}.")
+
+# My own recommendations, written by hand in data/recommendations.md
+st.markdown("**My recommendations**")
+st.markdown(load_recommendations().get(app, "TODO: add recommendations to data/recommendations.md"))
+
+# ---------------- Read the reviews ----------------
+st.subheader("Read the reviews")
+
+
+def reset_count():
+    st.session_state["shown"] = 10
+
+
+def show_more():
+    st.session_state["shown"] = st.session_state.get("shown", 10) + 10
+
+
+c1, c2 = st.columns([1, 2])
+with c1:
+    read_app = st.segmented_control("App ", list(config.APPS), default=list(config.APPS)[0], key="read_app",
+                                    on_change=reset_count) or list(config.APPS)[0]
+with c2:
+    default_theme = theme_names.index(trend_theme) if trend_theme in theme_names else 0
+    read_theme = st.selectbox("Topic", theme_names, index=default_theme, key="read_theme", on_change=reset_count)
+
+picked = df[(df["app"] == read_app) & (df["theme"] == read_theme)].sort_values("at", ascending=False)
+shown = st.session_state.get("shown", 10)
+st.caption(f"{len(picked):,} reviews · newest first")
+for r in picked.head(shown).itertuples():
+    with st.container(border=True):
+        st.markdown(plain(r.content))
+        stars = "★" * int(r.score) + "☆" * (5 - int(r.score))
+        html_line("meta", f"{stars}  ·  {r.at:%d %b %Y}")
+if len(picked) > shown:
+    st.button(f"Show more ({len(picked) - shown:,} left)", on_click=show_more)
+
+# ---------------- About ----------------
+st.divider()
+st.subheader("About this project")
+st.markdown(f"Built by **Kartik Khati** · [GitHub]({GITHUB_URL}) · [LinkedIn]({LINKEDIN_URL})")
+# TODO: rewrite in my words
+st.write("TODO: why I built this.")
+
+st.markdown("**How it works**")
+# TODO: rewrite in my words
+st.markdown(
+    "1. Downloaded the newest 10,000 Google Play reviews per app and kept those with 4 or more words.\n"
+    "2. An LLM proposed complaint topics. I edited them into one shared list of 16.\n"
+    "3. The LLM labelled every review with one topic and a sentiment, 25 reviews at a time.\n"
+    "4. This page compares the apps with significance tests and checks the main finding.")
+
+# Latest accuracy result from eval.py (None until I've hand-labelled and run the evaluation)
+eval_file = config.DATA_DIR / "eval_results.csv"
+latest_eval = pd.read_csv(eval_file).iloc[-1] if eval_file.exists() else None
+
+st.markdown("**Limitations**")
+# TODO: rewrite in my words
+limits = [
+    "Reviews skew negative, because short reviews (mostly positive) were removed. This ranks problems; "
+    "it does not measure satisfaction.",
+    "Upvote counts are small, because the reviews are recent.",
+    "The Instamart check uses keywords, so it can miss grocery reviews.",
+    "AI labels are not perfect. " + ("See accuracy below." if latest_eval is not None
+                                     else "Accuracy check in progress."),
+]
+if done < total:
+    limits.insert(1, f"{done / total:.0%} of reviews are classified so far. Numbers are from a random sample.")
+st.markdown("\n".join(f"- {x}" for x in limits))
+
+st.markdown("**The short-review filter**")
+# TODO: rewrite in my words
+st.caption("Most removed reviews were 4–5 stars, so the reviews left behind skew negative.")
 st.dataframe(
-    summary[["app", "fetched", "avg_rating_all", "kept", "avg_rating_kept", "short_dropped", "pct_short_4_5_star"]],
+    summary[["app", "fetched", "avg_rating_all", "kept", "avg_rating_kept", "pct_short_4_5_star"]],
     hide_index=True, width="stretch",
     column_config={
-        "app": "App", "fetched": "Reviews fetched", "avg_rating_all": "Avg ★ (all)",
-        "kept": "Kept (4+ words)", "avg_rating_kept": "Avg ★ (kept)", "short_dropped": "Short reviews dropped",
-        "pct_short_4_5_star": st.column_config.NumberColumn("% of dropped that were 4–5★", format="%.1f%%"),
-    },
-)
-st.caption(f"Newest 10,000 reviews per app from Google Play (India, English store). Analysis window "
-           f"{WINDOW_LABEL}, the period both apps cover. Themes and sentiment by {config.LLM_MODEL}.")
+        "app": "App",
+        "fetched": st.column_config.NumberColumn("Reviews fetched", format="localized"),
+        "avg_rating_all": st.column_config.NumberColumn("Avg stars, all", format="%.2f"),
+        "kept": st.column_config.NumberColumn("Kept (4+ words)", format="localized"),
+        "avg_rating_kept": st.column_config.NumberColumn("Avg stars, kept", format="%.2f"),
+        "pct_short_4_5_star": st.column_config.NumberColumn("Removed that were 4–5 stars", format="%.0f%%"),
+    })
 
-# --- Review explorer ---
-st.header("Review explorer")
-theme = st.selectbox("Theme", theme_names, index=theme_names.index(top4[0]) if top4 else 0)
-picked = mine[mine["theme"] == theme].sort_values("thumbsUpCount", ascending=False)
-st.caption(f"{len(picked):,} {app} reviews, most upvoted first")
-st.dataframe(
-    picked[["thumbsUpCount", "score", "sentiment", "at", "content"]],
-    hide_index=True, width="stretch", height=400,
-    column_config={
-        "thumbsUpCount": st.column_config.NumberColumn("👍", width="small"),
-        "score": st.column_config.NumberColumn("★", width="small"),
-        "sentiment": "Sentiment",
-        "at": st.column_config.DatetimeColumn("Date", format="DD MMM"),
-        "content": st.column_config.TextColumn("Review", width="large"),
-    },
-)
+if latest_eval is not None:  # hidden completely until the evaluation exists
+    sentiment = latest_eval["sentiment_accuracy"]
+    sentiment_part = f" (sentiment: {sentiment:.0%})" if pd.notna(sentiment) else ""
+    # TODO: rewrite in my words
+    st.markdown(f"**Accuracy:** {latest_eval['theme_accuracy']:.0%} of topics matched my own labels on "
+                f"{int(latest_eval['n'])} hand-labelled reviews{sentiment_part}.")
+# TODO: rewrite in my words
+st.caption(f"Data: Google Play, India, English store, {an.PERIOD}. Topics and sentiment by {config.LLM_MODEL}.")
