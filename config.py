@@ -9,7 +9,7 @@ load_dotenv()  # copies LLM_* values from the .env file into environment variabl
 # --- LLM settings (read from .env locally, from Secrets on Streamlit Cloud) ---
 LLM_API_KEY = os.getenv("LLM_API_KEY")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL")
-LLM_MODEL = os.getenv("LLM_MODEL")
+LLM_MODEL = os.getenv("LLM_MODEL") or "openai/gpt-oss-120b"  # default = model the data was labelled with
 REASONING_EFFORT = "low"  # gpt-oss is a reasoning model; "low" = less thinking, fewer tokens
 
 # --- Groq free-tier limits for openai/gpt-oss-120b ---
