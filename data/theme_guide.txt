@@ -1,0 +1,46 @@
+THEMES (copy the name exactly into my_theme)
+
+Late delivery
+    Order arrived much later than promised, or the delivery time kept increasing.
+Delivery partner behaviour
+    Rider was rude, asked for extra money, refused to come to the door, or marked the order delivered without delivering it.
+Wrong or missing items
+    Received the wrong dish, or some items in the order were missing.
+Food quality & hygiene
+    Food was cold, stale, spoiled, tasted bad, had small portions, or packaging leaked.
+Pricing & fees
+    High delivery, platform, packaging or surge fees, or menu prices higher than at the restaurant.
+Payment problems
+    Money deducted but order failed, charged twice, or charged an amount the user did not expect.
+Refund issues
+    Refund delayed, denied, partial, or given only as app wallet credit.
+Order cancellation issues
+    User could not cancel, was charged a cancellation fee, or the order was cancelled by the restaurant or app.
+Customer support
+    Only a chatbot, could not reach a human agent, complaint not resolved, or support was rude.
+App bugs & usability
+    App crashes, errors, slow loading, login or OTP problems, or wrong address or location.
+Offers, coupons & memberships
+    Coupons not applying, misleading discounts, or memberships like Swiggy One or Zomato Gold not giving promised benefits.
+Praise: fast & convenient
+    Positive review about quick delivery or easy ordering.
+Praise: food & service quality
+    Positive review about tasty food, good packaging or helpful service.
+Praise: general
+    General positive review without a specific reason.
+Complaint: general
+    Negative review with no specific reason, like 'worst app' or 'very bad service'.
+Other
+    Unrelated to the app experience, or impossible to judge (e.g. 'don't know yet').
+
+TIE-BREAK RULES
+- Several problems: pick the one the user is most upset about; if unclear, the one mentioned first.
+- User asking where their money is -> "Refund issues", even if they also complain about support.
+- Money deducted but order failed, or charged twice -> "Payment problems".
+- Food arrived cold BECAUSE it was late -> "Late delivery".
+- Rider being slow -> "Late delivery". Rider rude, asking for money, or faking delivery -> "Delivery partner behaviour".
+- Vague negative review with no specific reason ("worst app", "very bad service") -> "Complaint: general".
+- "Other" is ONLY for reviews unrelated to the app experience or impossible to judge (e.g. "don't know yet").
+- Judge sentiment from the text, not the star rating.
+
+SENTIMENT (my_sentiment): negative, neutral or positive - judged from the text, not the stars.

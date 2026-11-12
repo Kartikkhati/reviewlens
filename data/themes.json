@@ -1,0 +1,66 @@
+[
+  {
+    "name": "Late delivery",
+    "description": "Order arrived much later than promised, or the delivery time kept increasing."
+  },
+  {
+    "name": "Delivery partner behaviour",
+    "description": "Rider was rude, asked for extra money, refused to come to the door, or marked the order delivered without delivering it."
+  },
+  {
+    "name": "Wrong or missing items",
+    "description": "Received the wrong dish, or some items in the order were missing."
+  },
+  {
+    "name": "Food quality & hygiene",
+    "description": "Food was cold, stale, spoiled, tasted bad, had small portions, or packaging leaked."
+  },
+  {
+    "name": "Pricing & fees",
+    "description": "High delivery, platform, packaging or surge fees, or menu prices higher than at the restaurant."
+  },
+  {
+    "name": "Payment problems",
+    "description": "Money deducted but order failed, charged twice, or charged an amount the user did not expect."
+  },
+  {
+    "name": "Refund issues",
+    "description": "Refund delayed, denied, partial, or given only as app wallet credit."
+  },
+  {
+    "name": "Order cancellation issues",
+    "description": "User could not cancel, was charged a cancellation fee, or the order was cancelled by the restaurant or app."
+  },
+  {
+    "name": "Customer support",
+    "description": "Only a chatbot, could not reach a human agent, complaint not resolved, or support was rude."
+  },
+  {
+    "name": "App bugs & usability",
+    "description": "App crashes, errors, slow loading, login or OTP problems, or wrong address or location."
+  },
+  {
+    "name": "Offers, coupons & memberships",
+    "description": "Coupons not applying, misleading discounts, or memberships like Swiggy One or Zomato Gold not giving promised benefits."
+  },
+  {
+    "name": "Praise: fast & convenient",
+    "description": "Positive review about quick delivery or easy ordering."
+  },
+  {
+    "name": "Praise: food & service quality",
+    "description": "Positive review about tasty food, good packaging or helpful service."
+  },
+  {
+    "name": "Praise: general",
+    "description": "General positive review without a specific reason."
+  },
+  {
+    "name": "Complaint: general",
+    "description": "Negative review with no specific reason, like 'worst app' or 'very bad service'."
+  },
+  {
+    "name": "Other",
+    "description": "Unrelated to the app experience, or impossible to judge (e.g. 'don't know yet')."
+  }
+]
